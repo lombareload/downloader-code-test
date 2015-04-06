@@ -1,33 +1,35 @@
 package com.fabian.downloader.execution;
 
-import java.io.File;
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.RandomAccessFile;
-import java.net.*;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
+import java.net.HttpURLConnection;
+import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 
 public class DownloadExecutor {
 
-    private static final String DOWNLOAD_FILE_NAME = "downloadedFile";
-    private final ExecutorService executor = Executors.newFixedThreadPool(6);
+    private final ExecutorService executor =
+//            new ThreadPoolExecutor(6, 6, 10L, TimeUnit.MINUTES, new LinkedBlockingQueue<Runnable>(), new ThreadPoolExecutor.CallerRunsPolicy());
+            Executors.newFixedThreadPool(6);
+    private AtomicBoolean executing = new AtomicBoolean(false);
+    private final Lock lock = new ReentrantLock();
+    private Condition isPaused = lock.newCondition();
+
+
     private final String fileLocation;
     private final int chunkSize;
     private final RandomAccessFile randomAccessFile;
-    private AtomicBoolean executing = new AtomicBoolean(false);
 
     public DownloadExecutor(String fileLocation, int chunkSize) throws IOException {
         this.fileLocation = fileLocation;
         this.chunkSize = chunkSize;
-        this.randomAccessFile = resetFile();
+        this.randomAccessFile = DownloadHelper.resetFile(DownloadHelper.extractFileName(fileLocation));
     }
 
     public boolean isExecuting(){
@@ -39,73 +41,48 @@ public class DownloadExecutor {
     }
 
     public void continueExecution(){
+        lock.lock();
         executing.set(true);
+        isPaused.signalAll();
+        lock.unlock();
     }
 
-    public void startExecution() throws IOException, URISyntaxException, InterruptedException {
+    public void waitIfPaused() throws InterruptedException {
+        lock.lock();
+        if (!isExecuting()){
+            isPaused.await();
+        }
+        lock.unlock();
+    }
+
+    public void startExecution() throws IOException, URISyntaxException, InterruptedException, ExecutionException {
         HttpURLConnection connection = DownloadHelper.getConnection(getFileLocation());
         connection.setRequestMethod("HEAD");
-        long contentLenght = connection.getHeaderFieldLong("Content-Length", 0);
-        System.out.println(connection.getHeaderFields());
+        int contentLength = connection.getHeaderFieldInt("Content-Length", 0);
 
-        List<Callable<byte[]>> callables = initializeThreadInstances(contentLenght);
+        List<Callable<byte[]>> callables = initializeThreadInstances(contentLength);
 
-        executor.invokeAll(callables);
         executing.set(true);
+        List<Future<byte[]>> futures = executor.invokeAll(callables);
+        for (Future<byte[]> future : futures) {
+            randomAccessFile.write(future.get());
+        }
+        executor.shutdown();
+        randomAccessFile.close();
+        System.exit(0);
     }
 
     public String getFileLocation() {
         return fileLocation;
     }
 
-    private RandomAccessFile resetFile() throws IOException{
-        Path path = Paths.get(DOWNLOAD_FILE_NAME);
-        Files.deleteIfExists(path);
-        Path filePath = Files.createFile(path);
-        RandomAccessFile randomAccessFile = new RandomAccessFile(filePath.toFile(), "rw");
-        return randomAccessFile;
-    }
-
-    private List<Callable<byte[]>> initializeThreadInstances(long totalFileLength){
+    private List<Callable<byte[]>> initializeThreadInstances(int totalFileLength) {
         List<Callable<byte[]>> callables = new ArrayList<>();
-        for(long currentByte = 0; currentByte < totalFileLength; currentByte += chunkSize){
-            long endPosition = currentByte + chunkSize;
+        for(int currentByte = 0; currentByte < totalFileLength; currentByte += chunkSize){
+            int endPosition = currentByte + chunkSize;
             endPosition = endPosition > totalFileLength ? totalFileLength : endPosition;
             callables.add(new DownloadThread(this, currentByte, endPosition));
         }
         return callables;
-    }
-
-
-    private class DownloadThread implements Callable<byte[]> {
-
-        private final DownloadExecutor downloadExecutor;
-        private final long startPosition;
-        private final long endPosition;
-
-        public DownloadThread(DownloadExecutor downloadExecutor, long startPosition, long endPosition) {
-            this.downloadExecutor = downloadExecutor;
-            this.startPosition = startPosition;
-            this.endPosition = endPosition;
-        }
-
-        @Override
-        public byte[] call() throws IOException, URISyntaxException, InterruptedException {
-            HttpURLConnection connection = DownloadHelper.getConnection(downloadExecutor.getFileLocation());
-            connection.setRequestMethod("GET");
-            connection.setRequestProperty("Range", "bytes="+ startPosition + "-" + endPosition);
-            InputStream inputStream = connection.getInputStream();
-            int currentByte;
-            while((currentByte = inputStream.read())!= -1){
-                // pause
-                while(!downloadExecutor.isExecuting()){
-                    wait();
-                }
-
-            }
-            //            urlConnection.addRequestProperty();
-//            RandomAccessFile randomAccessFile = new RandomAccessFile("downloadedFile", "rw");
-            return null;
-        }
     }
 }
