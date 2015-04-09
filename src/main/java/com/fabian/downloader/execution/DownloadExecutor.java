@@ -14,9 +14,7 @@ import java.util.concurrent.locks.ReentrantLock;
 
 public class DownloadExecutor {
 
-    private final ExecutorService executor =
-//            new ThreadPoolExecutor(6, 6, 10L, TimeUnit.MINUTES, new LinkedBlockingQueue<Runnable>(), new ThreadPoolExecutor.CallerRunsPolicy());
-            Executors.newFixedThreadPool(6);
+    private final ExecutorService executor = Executors.newFixedThreadPool(6);
     private AtomicBoolean executing = new AtomicBoolean(false);
     private final Lock lock = new ReentrantLock();
     private Condition isPaused = lock.newCondition();
@@ -48,11 +46,11 @@ public class DownloadExecutor {
     }
 
     public void waitIfPaused() throws InterruptedException {
-        lock.lock();
         if (!isExecuting()){
+            lock.lock();
             isPaused.await();
+            lock.unlock();
         }
-        lock.unlock();
     }
 
     public void startExecution() throws IOException, URISyntaxException, InterruptedException, ExecutionException {
